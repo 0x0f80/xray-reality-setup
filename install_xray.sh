@@ -413,9 +413,7 @@ cat > /etc/logrotate.d/xray << 'EOF'
     compress
     missingok
     notifempty
-    postrotate
-        kill -HUP $(pidof xray) 2>/dev/null || true
-    endscript
+    copytruncate
 }
 EOF
 
