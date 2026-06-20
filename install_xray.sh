@@ -206,9 +206,9 @@ hdr "УСТАНОВКА XRAY-CORE"
 
 if command -v xray &>/dev/null; then
   info "Xray уже установлен, обновляем до последней версии..."
-  bash -c "$(curl -4 -fL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ upgrade
+  bash -c "$(curl -4 -fL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ upgrade || true
 else
-  bash -c "$(curl -4 -fL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+  bash -c "$(curl -4 -fL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install || true
 fi
 
 command -v xray &>/dev/null || err "Xray не установился, проверьте подключение к интернету"
