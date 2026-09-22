@@ -1,6 +1,8 @@
 ## Xray VLESS + Reality — Автоматическая установка
 
 Скрипт для быстрой установки **Xray-core** с протоколом **VLESS + Reality** на VPS. Без доменов, без сертификатов, без панелей — одна команда и готово.
+
+Настроен под ТСПУ 2026: два транспорта на одном порту 443 — **XHTTP** (основной) и **TCP + Vision** (запасной).
 ---
 
 ## Требования
@@ -20,10 +22,11 @@ wget -qO install_xray.sh https://raw.githubusercontent.com/0x0f80/xray-reality-s
 
 Скрипт спросит:
 
-1. **Транспорт** — TCP (классика, все клиенты) или XHTTP (новый, меняет сигнатуру трафика)
+1. **Версию Xray** — v26.9.9 (рекомендуется) или стабильную ветку (только для клиентов на sing-box)
 2. **Порт** — 443 по умолчанию
+3. **Сайт для маскировки** — скрипт сам проверит кандидатов и предложит рабочий
 
-После установки на экране появится ссылка и QR-код для подключения.
+После установки на экране появятся две ссылки (XHTTP и Vision) и QR-код.
 
 ### Что настраивается автоматически
 
@@ -39,55 +42,60 @@ UFW (файрвол) · Fail2Ban (защита SSH) · TCP BBR · Nginx-загл
 ╔════════════════════════════════════════╗
 ║     Xray VLESS + Reality — Меню        ║
 ╠════════════════════════════════════════╣
-║  1. Ссылка основного пользователя      ║
+║  1. Ссылки основного пользователя      ║
 ║  2. Создать пользователя               ║
 ║  3. Удалить пользователя               ║
-║  4. Ссылка для пользователя            ║
+║  4. Ссылки для пользователя            ║
 ║  5. Список пользователей               ║
 ║  6. Статус Xray                        ║
 ║  7. Перезапустить Xray                 ║
 ║  8. Создать бэкап                      ║
-║  9. Помощь                             ║
+║  9. Обновить Xray                      ║
+║ 10. Сайт маскировки: проверить/сменить ║
+║ 11. Помощь                             ║
 ║  0. Выход                              ║
 ╚════════════════════════════════════════╝
 ```
 
-Каждый пункт также доступен как отдельная команда: `mainuser`, `newuser`, `rmuser`, `sharelink`, `userlist`, `xraystatus`, `xraybackup`.
+Каждый пункт также доступен как отдельная команда: `mainuser`, `newuser`, `rmuser`, `sharelink`, `userlist`, `xraystatus`, `xraybackup`, `xupdate`, `xtarget`.
 
 ---
 
-## TCP или XHTTP?
+## XHTTP или Vision?
 
-| | TCP + Vision | XHTTP |
+Каждый пользователь получает обе ссылки — они работают на одном порту.
+
+| | XHTTP | TCP + Vision |
 |---|---|---|
-| **Совместимость** | Все клиенты | v2rayNG, v2rayN, Hiddify |
-| **Обход DPI** | Стандартный | Другая сигнатура |
-| **Рекомендация** | По умолчанию | Если TCP блокируют |
+| **Роль** | Основная | Запасная |
+| **Соединений к серверу** | Не больше 3 | По одному на каждый запрос |
+| **Когда брать** | Всегда | Если XHTTP не подключается или нужна макс. скорость загрузок |
+
+ТСПУ замораживает узел, если к одному SNI идёт больше 3 параллельных TLS-соединений с отпечатком Chrome. XHTTP укладывается в этот лимит, Vision — нет.
 
 ---
 
 ## Клиенты
 
+Нужен клиент на ядре **Xray 26.3.27+**.
+
 | Платформа | Приложения |
 |-----------|-----------|
-| **Android** | [NekoBox](https://github.com/MatsuriDayo/NekoBoxForAndroid), [v2rayNG](https://github.com/2dust/v2rayNG) |
-| **iOS** | [Streisand](https://apps.apple.com/app/streisand/id6450534064), [Happ](https://apps.apple.com/us/app/happ-proxy-utility/id6504287215) |
-| **Windows** | [v2rayN](https://github.com/2dust/v2rayN), [Throne](https://github.com/throneproj/Throne) |
-| **macOS** | [Throne](https://github.com/throneproj/Throne), [V2RayXS](https://github.com/tzmax/V2RayXS) |
-| **Linux** | [Throne](https://github.com/throneproj/Throne), [v2rayN](https://github.com/2dust/v2rayN) |
+| **Android** | [v2rayNG](https://github.com/2dust/v2rayNG) 2.3.8+, Happ |
+| **iOS** | [Happ](https://apps.apple.com/us/app/happ-proxy-utility/id6504287215) |
+| **Windows** | [v2rayN](https://github.com/2dust/v2rayN) 7.25+ |
 
-> Для XHTTP убедитесь, что клиент поддерживает этот транспорт.
+> **NekoBox, Hiddify, Throne, Karing не подойдут.** Они на ядре sing-box: XHTTP не умеют, а к серверу v26.9.9 не подключаются вообще.
 
 ---
 
 ## Обновление ядра
 
-Обновляет Xray-core без потери пользователей и настроек:
-
 ```bash
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-systemctl restart xray
+xupdate
 ```
+
+Перед заменой проверяет конфиг, а если новая версия не запустилась — откатывается на прежнюю. После обновления сервера обновите и клиенты: версии должны быть близки.
 
 ---
 
@@ -96,7 +104,7 @@ systemctl restart xray
 ```bash
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove
 rm -rf /usr/local/etc/xray
-rm -f /usr/local/bin/{x,mainuser,newuser,rmuser,sharelink,userlist,xraybackup,xraystatus}
+rm -f /usr/local/bin/{x,mainuser,newuser,rmuser,sharelink,userlist,xraybackup,xraystatus,xupdate,xtarget}
 rm -f /usr/local/lib/xray_link.sh
 rm -f /etc/logrotate.d/xray /etc/fail2ban/jail.d/xray.conf
 ```
