@@ -309,9 +309,11 @@ fix_log_owner() {
 }
 
 # Проверка конфига: test_cfg <файл>. Возвращает 0, если Xray его принимает.
+# -format json обязателен: формат Xray берёт из расширения, а у временных
+# файлов mktemp (tmp.XXXXXXXXXX) его нет — без флага «Failed to get format».
 test_cfg() {
   local rc=0
-  xray run -test -c "$1" >/dev/null 2>&1 || rc=1
+  xray run -test -format json -c "$1" >/dev/null 2>&1 || rc=1
   fix_log_owner
   return $rc
 }
