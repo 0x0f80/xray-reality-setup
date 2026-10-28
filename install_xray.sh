@@ -299,6 +299,23 @@ secure_cfg() {
   fi
 }
 
+# Служба работает от пользователя xray, а установщик (с октября 2026) больше
+# не создаёт файлы логов заранее. Проверка конфига от root создаёт их от root —
+# и служба потом не может в них писать и не стартует. Возвращаем логи xray.
+fix_log_owner() {
+  if id xray >/dev/null 2>&1 && [ -d /var/log/xray ]; then
+    chown -R xray:xray /var/log/xray 2>/dev/null || true
+  fi
+}
+
+# Проверка конфига: test_cfg <файл>. Возвращает 0, если Xray его принимает.
+test_cfg() {
+  local rc=0
+  xray run -test -c "$1" >/dev/null 2>&1 || rc=1
+  fix_log_owner
+  return $rc
+}
+
 server_ip() {
   local ip
   ip=$(timeout 5 curl -4 -s https://ifconfig.me 2>/dev/null || \
@@ -727,7 +744,7 @@ cat > "$XRAY_CFG" << XRAYCFG
 XRAYCFG
 
 jq empty "$XRAY_CFG" || err "Ошибка в JSON конфигурации!"
-xray run -test -c "$XRAY_CFG" >/dev/null 2>&1 || \
+test_cfg "$XRAY_CFG" || \
   err "Xray не принял конфигурацию!\nПроверка: xray run -test -c $XRAY_CFG"
 secure_cfg "$XRAY_CFG"
 ok "Конфигурация создана и проверена Xray (XHTTP + Vision на порту $VLESS_PORT)"
@@ -786,7 +803,7 @@ tmpfile=$(mktemp)
 if jq --arg e "$email" --arg u "$uuid" '
      (.inbounds[] | select(.tag=="vless-in") | .settings.clients) += [{"email":$e,"id":$u,"flow":"xtls-rprx-vision","level":0}]
    | (.inbounds[] | select(.tag=="xhttp-in") | .settings.clients) += [{"email":$e,"id":$u,"flow":"","level":0}]
-   ' "$XRAY_CFG" > "$tmpfile" && xray run -test -c "$tmpfile" >/dev/null 2>&1; then
+   ' "$XRAY_CFG" > "$tmpfile" && test_cfg "$tmpfile"; then
   mv "$tmpfile" "$XRAY_CFG" && secure_cfg "$XRAY_CFG"
 else
   rm -f "$tmpfile"
@@ -1026,7 +1043,7 @@ if [ "$fp" = edge ] && [ -n "$new" ] && ver_ge "$new" 26.9.8; then
   fi
 fi
 
-if ! xray run -test -c "$XRAY_CFG" >/dev/null 2>&1; then
+if ! test_cfg "$XRAY_CFG"; then
   [ -n "$cur" ] && rollback "Новая версия не принимает конфиг"
   exit 1
 fi
@@ -1089,7 +1106,7 @@ tmpfile=$(mktemp)
 jq --arg d "$new" \
   '(.inbounds[] | select(.tag=="vless-in") | .streamSettings.realitySettings) |= (.target = ($d + ":443") | .serverNames = [$d])' \
   "$XRAY_CFG" > "$tmpfile"
-if ! xray run -test -c "$tmpfile" >/dev/null 2>&1; then
+if ! test_cfg "$tmpfile"; then
   rm -f "$tmpfile"
   echo -e "${RED}Конфиг не прошёл проверку, ничего не изменено${NC}"; exit 1
 fi
@@ -1223,6 +1240,7 @@ ok "Все утилиты созданы (главное меню: x)"
 # ── 17. Запуск Xray ───────────────────────────────────────────────────────────
 hdr "ЗАПУСК XRAY"
 
+fix_log_owner
 systemctl enable xray --quiet
 systemctl restart xray
 sleep 2
@@ -1230,7 +1248,9 @@ sleep 2
 if systemctl is-active --quiet xray; then
   ok "Xray работает"
 else
-  err "Xray не запустился!\nЛоги: journalctl -u xray -n 50\nКонфиг: jq . $XRAY_CFG"
+  echo -e "${RED}--- последние строки журнала Xray ---${NC}"
+  journalctl -u xray -n 8 --no-pager -o cat 2>/dev/null || true
+  err "Xray не запустился! Полный журнал: journalctl -u xray -n 50 --no-pager"
 fi
 
 # ── 18. Самопроверка ──────────────────────────────────────────────────────────
