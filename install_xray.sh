@@ -309,11 +309,11 @@ fix_log_owner() {
 }
 
 # Проверка конфига: test_cfg <файл>. Возвращает 0, если Xray его принимает.
-# -format json обязателен: формат Xray берёт из расширения, а у временных
-# файлов mktemp (tmp.XXXXXXXXXX) его нет — без флага «Failed to get format».
+# Файл должен оканчиваться на .json: Xray 26.10+ при run не читает конфиг
+# без расширения (даже с -format json), поэтому временные — mktemp --suffix=.json.
 test_cfg() {
   local rc=0
-  xray run -test -format json -c "$1" >/dev/null 2>&1 || rc=1
+  xray run -test -c "$1" >/dev/null 2>&1 || rc=1
   fix_log_owner
   return $rc
 }
@@ -801,7 +801,7 @@ fi
 uuid=$(xray uuid)
 
 # Один UUID в обоих входах: Vision — с flow, XHTTP — без
-tmpfile=$(mktemp)
+tmpfile=$(mktemp --suffix=.json)
 if jq --arg e "$email" --arg u "$uuid" '
      (.inbounds[] | select(.tag=="vless-in") | .settings.clients) += [{"email":$e,"id":$u,"flow":"xtls-rprx-vision","level":0}]
    | (.inbounds[] | select(.tag=="xhttp-in") | .settings.clients) += [{"email":$e,"id":$u,"flow":"","level":0}]
@@ -1104,7 +1104,7 @@ echo -e "${GREEN}подходит${NC}"
 
 xraybackup >/dev/null
 
-tmpfile=$(mktemp)
+tmpfile=$(mktemp --suffix=.json)
 jq --arg d "$new" \
   '(.inbounds[] | select(.tag=="vless-in") | .streamSettings.realitySettings) |= (.target = ($d + ":443") | .serverNames = [$d])' \
   "$XRAY_CFG" > "$tmpfile"
