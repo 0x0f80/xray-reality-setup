@@ -3,6 +3,10 @@
 #  Протокол: VLESS + REALITY (обход DPI/ТСПУ)
 #  Транспорты: XHTTP (основной) + TCP/Vision (запасной) — оба на одном порту
 #  Маскировка: выбирается при установке и проверяется через xray tls ping
+#  Режимы: обычный (свежий Xray, отпечаток chrome) и совместимости
+#          (Xray 26.7.28, отпечаток edge — для сетей, где теряется длинное
+#          TLS-приветствие)
+#  После установки сервер сам проверяет себя клиентом Xray (самопроверка)
 #
 #  Запуск:
 #    bash install_xray.sh
@@ -31,12 +35,19 @@ LINK_LIB="/usr/local/lib/xray_link.sh"
 BACKUP_DIR="/usr/local/etc/xray/backups"
 INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 
-# Проверенная версия Xray: то же ядро, что в v2rayN 7.25.2 и v2rayNG 2.3.8.
-# С 26.9.8 исправлен баг с сертификатом www.microsoft.com (Xray #6356),
-# а сервер пускает только клиентов с отпечатком настоящего Chrome.
-XRAY_PIN="v26.9.9"
+# Основная версия Xray (21.10.2026). Срочное исправление безопасности:
+# из встроенного списка корневых сертификатов убраны скомпрометированные.
+# Сервер новее 26.9.8 пускает только клиентов с постквантовым TLS-приветствием
+# (отпечатки chrome, firefox, safari) — оно ~1,8 КБ и уходит двумя пакетами.
+XRAY_PIN="v26.10.21"
 
-# Кандидаты для маскировки. Проверены 2026-09-22: TLS 1.3, HTTP/2,
+# Режим совместимости: последняя версия, которая пускает и отпечаток edge.
+# Его приветствие ~0,5 КБ и помещается в один пакет. Нужен в сетях, где второй
+# пакет большого приветствия теряется (часть мобильных операторов РФ: Xray #7220,
+# #7259, LxBox #142). Минус: нет осенних исправлений Xray.
+XRAY_COMPAT="v26.7.28"
+
+# Кандидаты для маскировки. Проверены 2026-10-28: TLS 1.3, HTTP/2 (ALPN),
 # X25519MLKEM768, нет в реестре блокировок, без редиректа на чужой домен.
 # Скрипт перепроверяет их с сервера и берёт случайный из рабочих —
 # чтобы все, кто ставит этот скрипт, не светились одним и тем же SNI.
@@ -70,20 +81,27 @@ hdr "ВЕРСИЯ XRAY"
 
 echo ""
 echo -e "  ${CYAN}1${NC} — $XRAY_PIN (рекомендуется)"
-echo -e "      Клиенты на ядре Xray: v2rayN 7.25+, v2rayNG 2.3.8+, Happ"
-echo -e "  ${CYAN}2${NC} — стабильная ветка (март 2026)"
-echo -e "      Только если нужны клиенты на sing-box: NekoBox, Hiddify, Throne, Karing."
-echo -e "      К серверу $XRAY_PIN они не подключатся, а XHTTP не умеют совсем."
+echo -e "      Свежая версия с исправлением безопасности. Ссылки с отпечатком chrome."
+echo -e "  ${CYAN}2${NC} — $XRAY_COMPAT, режим совместимости"
+echo -e "      Если в вашей сети (чаще мобильной) подключение висит, а диагностика"
+echo -e "      показывает «failed to read client hello». Ссылки с отпечатком edge:"
+echo -e "      его TLS-приветствие короче и помещается в один пакет."
+echo -e "      Минус: старая версия, без осенних исправлений Xray."
+echo ""
+echo -e "  Клиенты: v2rayN, v2rayNG, Happ на ядре Xray 26.3.27 или новее. NekoBox,"
+echo -e "  Hiddify, Throne и Karing (ядро sing-box) не подключатся ни в одном режиме."
 echo ""
 read -p "Выберите версию (Enter = 1): " VER_CHOICE < /dev/tty
 VER_CHOICE=${VER_CHOICE:-1}
 
 if [[ "$VER_CHOICE" == "2" ]]; then
-  XRAY_CHANNEL="stable"
-  ok "Версия: стабильная ветка"
+  XRAY_VERSION="$XRAY_COMPAT"
+  FP="edge"
+  ok "Версия: $XRAY_VERSION (совместимость, отпечаток edge)"
 else
-  XRAY_CHANNEL="pin"
-  ok "Версия: $XRAY_PIN"
+  XRAY_VERSION="$XRAY_PIN"
+  FP="chrome"
+  ok "Версия: $XRAY_VERSION (отпечаток chrome)"
 fi
 
 # ── 3. Выбор порта ────────────────────────────────────────────────────────────
@@ -230,12 +248,10 @@ fi
 # ── 9. Установка Xray-core ────────────────────────────────────────────────────
 hdr "УСТАНОВКА XRAY-CORE"
 
-if [[ "$XRAY_CHANNEL" == "pin" ]]; then
-  bash -c "$(curl -4 -fL "$INSTALLER_URL")" @ install --version "$XRAY_PIN" || true
-else
-  # -f: поставить стабильную, даже если сейчас стоит более новая
-  bash -c "$(curl -4 -fL "$INSTALLER_URL")" @ install -f || true
-fi
+# -f: поставить выбранную версию, даже если сейчас стоит другая.
+# --logrotate: ротацию логов настраивает сам установщик — с октября 2026
+# он просит не заводить отдельных задач ротации (иначе возможны проблемы с правами).
+bash -c "$(curl -4 -fL "$INSTALLER_URL")" @ install --version "$XRAY_VERSION" -f --logrotate 04:00:00 || true
 
 command -v xray &>/dev/null || err "Xray не установился, проверьте подключение к интернету"
 XRAY_VER=$(xray version 2>&1 | head -1 || true)
@@ -266,6 +282,23 @@ XHTTP_EXTRA='{"xmux":{"maxConnections":3,"hMaxRequestTimes":"600-900","hMaxReusa
 
 uri() { jq -rn --arg s "$1" '$s|@uri'; }
 
+# Отпечаток TLS для ссылок: chrome (обычный режим) или edge (режим совместимости)
+get_fp() {
+  local fp
+  fp=$(awk '/^fp:/ {print $2}' "$XRAY_KEYS" 2>/dev/null || true)
+  echo "${fp:-chrome}"
+}
+
+# Права на конфиг по правилам установщика Xray (с октября 2026): root:xray 640 —
+# служба читает, посторонние нет. Если пользователя xray нет — по-старому, 644.
+secure_cfg() {
+  if id xray >/dev/null 2>&1; then
+    chown root:xray "$1" && chmod 640 "$1"
+  else
+    chmod 644 "$1"
+  fi
+}
+
 server_ip() {
   local ip
   ip=$(timeout 5 curl -4 -s https://ifconfig.me 2>/dev/null || \
@@ -282,7 +315,7 @@ server_ip() {
 # Возвращает 0, если подходит. TARGET_WHY — причина отказа,
 # TARGET_PQ=1 — сайт поддерживает постквантовый обмен X25519MLKEM768.
 check_target() {
-  local d="$1" ip4 out sans code loc lhost ver
+  local d="$1" ip4 out grp sans code loc lhost ver
   TARGET_WHY=""; TARGET_PQ=0
 
   # До 26.9.8 сертификат microsoft не влезает в буфер REALITY (Xray #6356)
@@ -302,6 +335,15 @@ check_target() {
   echo "$out" | grep -q "Handshake succeeded" || { TARGET_WHY="нет TLS-рукопожатия"; return 1; }
   echo "$out" | grep -q "TLS 1.3"             || { TARGET_WHY="нет TLS 1.3"; return 1; }
 
+  # REALITY прячет ключ в X25519: сайт с другим обменом (например P-256)
+  # отвечает HelloRetryRequest, и подключения не работают (Xray #6861)
+  grp=$(echo "$out" | sed -n 's/.*Post-Quantum key exchange:[[:space:]]*[a-z]*[[:space:]]*(\(.*\)).*/\1/p' | head -1)
+  case "$grp" in
+    X25519MLKEM768) TARGET_PQ=1 ;;
+    X25519)         TARGET_PQ=0 ;;
+    *) TARGET_WHY="обмен ключами ${grp:-неизвестен}, а нужен X25519"; return 1 ;;
+  esac
+
   sans=" $(echo "$out" | grep "allowed domains" | sed 's/.*\[//; s/\].*//') "
   if [[ "$sans" != *" $d "* && "$sans" != *" *.${d#*.} "* ]]; then
     TARGET_WHY="домена нет в сертификате"; return 1
@@ -319,14 +361,13 @@ check_target() {
     [[ "$lhost" == "$d" ]] || { TARGET_WHY="уводит на $lhost"; return 1; }
   fi
 
-  echo "$out" | grep -q "Post-Quantum key exchange:[[:space:]]*true" && TARGET_PQ=1
   return 0
 }
 
 # Ссылка пользователя: gen_link <email> <xhttp|vision> <ip>
 gen_link() {
   local email="$1" kind="$2" ip="$3"
-  local uuid port sni pbk sid xpath base
+  local uuid port sni pbk sid fp xpath base
 
   uuid=$(jq -r --arg e "$email" \
     '.inbounds[] | select(.tag=="vless-in") | .settings.clients[] | select(.email==$e) | .id' \
@@ -340,8 +381,9 @@ gen_link() {
   sni=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .streamSettings.realitySettings.serverNames[0]' "$XRAY_CFG")
   pbk=$(awk '/^PublicKey:/ {print $2}' "$XRAY_KEYS")
   sid=$(awk '/^shortsid:/ {print $2}' "$XRAY_KEYS")
+  fp=$(get_fp)
 
-  base="vless://${uuid}@${ip}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}"
+  base="vless://${uuid}@${ip}:${port}?encryption=none&security=reality&sni=${sni}&fp=${fp}&pbk=${pbk}&sid=${sid}"
 
   if [[ "$kind" == "vision" ]]; then
     echo "${base}&type=tcp&flow=xtls-rprx-vision#${email}-vision"
@@ -388,6 +430,63 @@ print_emails() {
     [[ "${emails[$i]}" == "main" ]] && marker=" ${YELLOW}(основной)${NC}"
     echo -e "  $((i+1)). ${emails[$i]}$marker"
   done
+}
+
+# Самопроверка: клиент Xray на самом сервере подключается к себе через 127.0.0.1
+# по обеим ссылкам (Vision и XHTTP), с тем же отпечатком, что в ссылках.
+# Ловит неподходящий сайт маскировки, сломанный конфиг и несовместимость версий
+# (например Xray #7243: на v26.10.21 часть сайтов маскировки перестала работать).
+# Возвращает 0, если работают оба варианта. Итог — в SELFTEST_RESULT.
+selftest() {
+  local port uuid sni pbk sid xpath fp kind label sp ss flow code p1="" p2="" rc=0
+  port=$(jq -r '.inbounds[]|select(.tag=="vless-in")|.port' "$XRAY_CFG")
+  uuid=$(jq -r '.inbounds[]|select(.tag=="vless-in")|.settings.clients[]|select(.email=="main")|.id' "$XRAY_CFG")
+  sni=$(jq -r '.inbounds[]|select(.tag=="vless-in")|.streamSettings.realitySettings.serverNames[0]' "$XRAY_CFG")
+  xpath=$(jq -r '.inbounds[]|select(.tag=="xhttp-in")|.streamSettings.xhttpSettings.path' "$XRAY_CFG")
+  pbk=$(awk '/^PublicKey:/ {print $2}' "$XRAY_KEYS")
+  sid=$(awk '/^shortsid:/ {print $2}' "$XRAY_KEYS")
+  fp=$(get_fp)
+  SELFTEST_RESULT=""
+
+  for kind in vision xhttp; do
+    if [ "$kind" = vision ]; then
+      sp=39101; flow="xtls-rprx-vision"; ss='{"network":"tcp"}'
+    else
+      sp=39102; flow=""
+      ss=$(jq -nc --arg p "$xpath" --argjson e "$XHTTP_EXTRA" \
+             '{network:"xhttp",xhttpSettings:{path:$p,mode:"auto",extra:$e}}')
+    fi
+    jq -n --argjson sp "$sp" --argjson port "$port" --arg id "$uuid" --arg flow "$flow" \
+          --arg sni "$sni" --arg fp "$fp" --arg pbk "$pbk" --arg sid "$sid" --argjson ss "$ss" '{
+      log: {loglevel: "warning"},
+      inbounds: [{listen: "127.0.0.1", port: $sp, protocol: "socks"}],
+      outbounds: [{protocol: "vless",
+        settings: {address: "127.0.0.1", port: $port, id: $id, flow: $flow, encryption: "none"},
+        streamSettings: ($ss + {security: "reality",
+          realitySettings: {serverName: $sni, fingerprint: $fp, password: $pbk, shortId: $sid}})}]
+    }' > "/tmp/xselftest_$kind.json"
+    xray run -c "/tmp/xselftest_$kind.json" > "/tmp/xselftest_$kind.log" 2>&1 &
+    if [ "$kind" = vision ]; then p1=$!; else p2=$!; fi
+  done
+  sleep 2
+
+  for kind in vision xhttp; do
+    if [ "$kind" = vision ]; then sp=39101; label="Vision"; else sp=39102; label="XHTTP"; fi
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+                --retry 2 --retry-connrefused --retry-delay 1 \
+                -x "socks5h://127.0.0.1:$sp" https://www.gstatic.com/generate_204 2>/dev/null || true)
+    if [ "$code" = 204 ]; then
+      SELFTEST_RESULT+="$label работает; "
+    else
+      SELFTEST_RESULT+="$label НЕ работает; "; rc=1
+    fi
+  done
+
+  kill "$p1" "$p2" 2>/dev/null || true
+  wait "$p1" "$p2" 2>/dev/null || true
+  rm -f /tmp/xselftest_vision.json /tmp/xselftest_xhttp.json
+  SELFTEST_RESULT="${SELFTEST_RESULT%; }"
+  return $rc
 }
 LINKLIB
 
@@ -445,8 +544,10 @@ ok "Маскировка: $TARGET"
 hdr "БЭКАП"
 
 mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR"   # в бэкапах лежит приватный ключ REALITY
 
-if [ -f "$XRAY_CFG" ]; then
+# На свежей системе установщик Xray кладёт пустой конфиг «{}» — бэкапить нечего
+if [ -s "$XRAY_CFG" ] && [ "$(tr -d ' \n\r\t' < "$XRAY_CFG")" != "{}" ]; then
   TS=$(date +%Y%m%d_%H%M%S)
   cp "$XRAY_CFG"  "$BACKUP_DIR/config.json.$TS"
   [ -f "$KEYS_FILE" ] && cp "$KEYS_FILE" "$BACKUP_DIR/keys.$TS"
@@ -492,6 +593,7 @@ PublicKey: $PUBLICKEY
 target: $TARGET
 port: $VLESS_PORT
 xhttp_path: $XHTTP_PATH
+fp: $FP
 EOF
 chmod 600 "$KEYS_FILE"
 
@@ -627,24 +729,19 @@ XRAYCFG
 jq empty "$XRAY_CFG" || err "Ошибка в JSON конфигурации!"
 xray run -test -c "$XRAY_CFG" >/dev/null 2>&1 || \
   err "Xray не принял конфигурацию!\nПроверка: xray run -test -c $XRAY_CFG"
-chmod 644 "$XRAY_CFG"
+secure_cfg "$XRAY_CFG"
 ok "Конфигурация создана и проверена Xray (XHTTP + Vision на порту $VLESS_PORT)"
 
 # ── 15. Ротация логов ─────────────────────────────────────────────────────────
 hdr "РОТАЦИЯ ЛОГОВ"
 
-cat > /etc/logrotate.d/xray << 'EOF'
-/var/log/xray/*.log {
-    daily
-    rotate 7
-    compress
-    missingok
-    notifempty
-    copytruncate
-}
-EOF
-
-ok "Logrotate настроен (7 дней, с компрессией)"
+# Ротацию настроил установщик Xray (флаг --logrotate): каждый день в 04:00,
+# хранит 7 дней, сжимает старые. Своих задач не заводим — он просит этого не делать.
+if [ -f /etc/logrotate.d/xray ]; then
+  ok "Ротация логов настроена установщиком Xray (ежедневно в 04:00, хранит 7 дней)"
+else
+  warn "Установщик Xray не настроил ротацию логов — логи могут разрастаться"
+fi
 
 # ── 16. Утилиты управления ────────────────────────────────────────────────────
 hdr "СОЗДАНИЕ УТИЛИТ"
@@ -690,7 +787,7 @@ if jq --arg e "$email" --arg u "$uuid" '
      (.inbounds[] | select(.tag=="vless-in") | .settings.clients) += [{"email":$e,"id":$u,"flow":"xtls-rprx-vision","level":0}]
    | (.inbounds[] | select(.tag=="xhttp-in") | .settings.clients) += [{"email":$e,"id":$u,"flow":"","level":0}]
    ' "$XRAY_CFG" > "$tmpfile" && xray run -test -c "$tmpfile" >/dev/null 2>&1; then
-  mv "$tmpfile" "$XRAY_CFG" && chmod 644 "$XRAY_CFG"
+  mv "$tmpfile" "$XRAY_CFG" && secure_cfg "$XRAY_CFG"
 else
   rm -f "$tmpfile"
   echo -e "${RED}Не удалось обновить конфиг, ничего не изменено${NC}"
@@ -742,7 +839,7 @@ read -p "Удалить '$selected'? (y/n): " confirm
 tmpfile=$(mktemp)
 jq --arg e "$selected" \
   '(.inbounds[].settings.clients) |= map(select(.email != $e))' \
-  "$XRAY_CFG" > "$tmpfile" && mv "$tmpfile" "$XRAY_CFG" && chmod 644 "$XRAY_CFG"
+  "$XRAY_CFG" > "$tmpfile" && mv "$tmpfile" "$XRAY_CFG" && secure_cfg "$XRAY_CFG"
 
 systemctl restart xray
 echo -e "${GREEN}Клиент '$selected' удалён${NC}"
@@ -831,7 +928,20 @@ echo -e "${CYAN}Версия:${NC}        $(xray version 2>&1 | head -1)"
 echo -e "${CYAN}Порт:${NC}          $port"
 echo -e "${CYAN}Транспорты:${NC}    XHTTP (основной) + TCP/Vision (запасной)"
 echo -e "${CYAN}Маскировка:${NC}    $target   (проверить или сменить: xtarget)"
+if [ "$(get_fp)" = edge ]; then
+  echo -e "${CYAN}Отпечаток:${NC}     edge — режим совместимости (короткое TLS-приветствие)"
+else
+  echo -e "${CYAN}Отпечаток:${NC}     chrome"
+fi
 echo -e "${CYAN}Пользователей:${NC} $users"
+echo ""
+echo -n "Самопроверка подключения... "
+if selftest; then
+  echo -e "${GREEN}$SELFTEST_RESULT${NC}"
+else
+  echo -e "${RED}$SELFTEST_RESULT${NC}"
+  echo -e "${YELLOW}Сервер не принимает подключения даже изнутри. Попробуйте сменить сайт: xtarget${NC}"
+fi
 echo ""
 SCRIPT
 chmod +x /usr/local/bin/xraystatus
@@ -842,33 +952,49 @@ cat > /usr/local/bin/xupdate << 'SCRIPT'
 source /usr/local/lib/xray_link.sh
 URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 
+# ver_ge A B — версия A не ниже B
+ver_ge() { [ "$(printf '%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
+
 cur=$(xray version 2>/dev/null | awk 'NR==1 {print $2}')
+fp=$(get_fp)
 
 echo ""
-echo -e "${CYAN}Текущая версия Xray:${NC} ${cur:-неизвестно}"
+echo -e "${CYAN}Текущая версия Xray:${NC} ${cur:-неизвестно}   ${CYAN}Отпечаток в ссылках:${NC} $fp"
 echo ""
-echo -e "  ${CYAN}1${NC} — последняя prerelease (самые свежие исправления)"
-echo -e "  ${CYAN}2${NC} — стабильная ветка (нужна для клиентов на sing-box)"
-echo -e "  ${CYAN}3${NC} — конкретная версия (например 26.9.9)"
-echo -e "  ${CYAN}4${NC} — только geo-файлы (списки для маршрутизации)"
+echo -e "  ${CYAN}1${NC} — последняя стабильная версия"
+echo -e "  ${CYAN}2${NC} — последняя prerelease (свежие исправления, но меньше проверены)"
+echo -e "  ${CYAN}3${NC} — конкретная версия (например 26.10.21)"
+echo -e "  ${CYAN}4${NC} — только geo-файлы (полные списки для маршрутизации)"
 echo -e "  ${CYAN}0${NC} — отмена"
 echo ""
 echo -e "${YELLOW}Важно:${NC} версии сервера и клиентов должны быть близки."
 echo -e "Обновили сервер — обновите и v2rayN / v2rayNG."
+echo -e "После обновления — самопроверка. Не пройдёт — верну прежнюю версию."
 echo ""
 read -p "Выбор: " c
 
 case "$c" in
-  1) args=(install --beta) ;;
-  2) args=(install -f) ;;
+  1) args=(install -f) ;;
+  2) args=(install --beta) ;;
   3) read -p "Версия: " v
      if ! [[ "$v" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
        echo -e "${RED}Неверный формат версии${NC}"; exit 1
      fi
-     args=(install --version "v${v#v}") ;;
-  4) args=(install-geodata) ;;
+     args=(install --version "v${v#v}" -f) ;;
+  4) args=(update-geodata) ;;
   *) echo "Отменено"; exit 0 ;;
 esac
+
+# Отпечаток edge принимают только версии до 26.9.8 (Xray #7259)
+switch_fp=""
+if [ "$fp" = edge ] && [ "$c" != 4 ]; then
+  echo ""
+  echo -e "${YELLOW}Ссылки сейчас с отпечатком edge, а версии Xray с 26.9.8 его не принимают.${NC}"
+  echo -e "Если новая версия окажется новее, ссылки нужно перевести на chrome"
+  echo -e "и заново раздать всем (sharelink). Без этого обновление откатится."
+  read -p "Перевести ссылки на chrome, если понадобится? (y/N): " sw
+  [[ "$sw" == "y" || "$sw" == "Y" ]] && switch_fp=chrome
+fi
 
 xraybackup >/dev/null
 
@@ -877,10 +1003,28 @@ if ! bash -c "$(curl -4 -fsSL "$URL")" @ "${args[@]}"; then
 fi
 
 rollback() {
-  echo -e "${RED}$1 — откатываемся на $cur${NC}"
-  bash -c "$(curl -4 -fsSL "$URL")" @ install --version "v$cur" >/dev/null 2>&1
+  echo -e "${RED}$1 — откатываюсь на $cur${NC}"
+  # -f: переустановить ту же версию (нужно и после обновления geo-файлов)
+  bash -c "$(curl -4 -fsSL "$URL")" @ install --version "v$cur" -f >/dev/null 2>&1
+  sed -i "s/^fp: .*/fp: $fp/" "$XRAY_KEYS"
   systemctl restart xray
+  exit 1
 }
+
+new=$(xray version 2>/dev/null | awk 'NR==1 {print $2}')
+
+if [ "$fp" = edge ] && [ -n "$new" ] && ver_ge "$new" 26.9.8; then
+  if [ "$switch_fp" = chrome ]; then
+    if grep -q '^fp:' "$XRAY_KEYS"; then
+      sed -i 's/^fp: .*/fp: chrome/' "$XRAY_KEYS"
+    else
+      echo "fp: chrome" >> "$XRAY_KEYS"
+    fi
+    echo -e "${YELLOW}Ссылки переведены на отпечаток chrome${NC}"
+  elif [ -n "$cur" ]; then
+    rollback "Версия $new не принимает отпечаток edge"
+  fi
+fi
 
 if ! xray run -test -c "$XRAY_CFG" >/dev/null 2>&1; then
   [ -n "$cur" ] && rollback "Новая версия не принимает конфиг"
@@ -894,9 +1038,17 @@ if ! systemctl is-active --quiet xray; then
   exit 1
 fi
 
-new=$(xray version 2>/dev/null | awk 'NR==1 {print $2}')
+echo -n "Самопроверка подключения... "
+if ! selftest; then
+  echo -e "${RED}$SELFTEST_RESULT${NC}"
+  [ -n "$cur" ] && rollback "Самопроверка не прошла"
+  exit 1
+fi
+echo -e "${GREEN}$SELFTEST_RESULT${NC}"
+
 echo ""
 echo -e "${GREEN}Готово: ${cur:-?} → ${new:-?}${NC}"
+[ "$(get_fp)" != "$fp" ] && echo -e "${YELLOW}Раздайте всем новые ссылки: sharelink${NC}"
 echo ""
 SCRIPT
 chmod +x /usr/local/bin/xupdate
@@ -941,9 +1093,26 @@ if ! xray run -test -c "$tmpfile" >/dev/null 2>&1; then
   rm -f "$tmpfile"
   echo -e "${RED}Конфиг не прошёл проверку, ничего не изменено${NC}"; exit 1
 fi
-mv "$tmpfile" "$XRAY_CFG" && chmod 644 "$XRAY_CFG"
+oldcfg=$(mktemp); cp "$XRAY_CFG" "$oldcfg"
+mv "$tmpfile" "$XRAY_CFG" && secure_cfg "$XRAY_CFG"
 sed -i "s/^target: .*/target: $new/" "$XRAY_KEYS"
 systemctl restart xray
+sleep 2
+
+# Некоторые сайты проходят проверку, но с REALITY всё равно не работают
+# (Xray #7243, #6861) — проверяем подключение по-настоящему
+echo -n "Самопроверка подключения... "
+if ! selftest; then
+  echo -e "${RED}не прошла: $SELFTEST_RESULT${NC}"
+  cp "$oldcfg" "$XRAY_CFG" && secure_cfg "$XRAY_CFG"
+  sed -i "s/^target: .*/target: $cur/" "$XRAY_KEYS"
+  systemctl restart xray
+  rm -f "$oldcfg"
+  echo -e "${YELLOW}Вернул прежний сайт: $cur. Попробуйте другой домен.${NC}"
+  exit 1
+fi
+rm -f "$oldcfg"
+echo -e "${GREEN}$SELFTEST_RESULT${NC}"
 
 echo ""
 echo -e "${GREEN}Сайт маскировки: $cur → $new${NC}"
@@ -960,7 +1129,7 @@ source /usr/local/lib/xray_link.sh
 show_menu() {
   echo ""
   echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
-  echo -e "${CYAN}║     Xray VLESS + Reality — Меню        ║${NC}"
+  echo -e "${CYAN}║      Xray VLESS + Reality — Меню       ║${NC}"
   echo -e "${CYAN}╠════════════════════════════════════════╣${NC}"
   echo -e "${CYAN}║${NC}  1. Ссылки основного пользователя      ${CYAN}║${NC}"
   echo -e "${CYAN}║${NC}  2. Создать пользователя               ${CYAN}║${NC}"
@@ -981,41 +1150,47 @@ show_menu() {
 show_help() {
   echo ""
   echo -e "${CYAN}╔════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${CYAN}║          Xray VLESS + Reality — Справка              ║${NC}"
+  echo -e "${CYAN}║             Xray VLESS + Reality — Справка             ║${NC}"
   echo -e "${CYAN}╠════════════════════════════════════════════════════════╣${NC}"
   echo -e "${CYAN}║${NC}                                                        ${CYAN}║${NC}"
   echo -e "${CYAN}║${NC}  ${GREEN}КОМАНДЫ (можно вызывать напрямую):${NC}                    ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    x          — это меню                                ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    mainuser   — ссылки и QR основного пользователя      ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    newuser    — создать нового пользователя             ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    rmuser     — удалить пользователя                    ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    sharelink  — ссылки для выбранного пользователя      ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    userlist   — список всех пользователей               ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    xraybackup — создать бэкап конфигурации              ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    xraystatus — статус, версия, сайт маскировки         ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    xupdate    — обновить Xray (с откатом при сбое)      ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    xtarget    — проверить или сменить сайт маскировки   ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    x          — это меню                               ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    mainuser   — ссылки и QR основного пользователя     ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    newuser    — создать нового пользователя            ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    rmuser     — удалить пользователя                   ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    sharelink  — ссылки для выбранного пользователя     ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    userlist   — список всех пользователей              ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    xraybackup — создать бэкап конфигурации             ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    xraystatus — статус, версия, сайт маскировки        ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    xupdate    — обновить Xray (с откатом при сбое)     ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    xtarget    — проверить или сменить сайт маскировки  ${CYAN}║${NC}"
   echo -e "${CYAN}║${NC}                                                        ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}  ${GREEN}ССЫЛКИ:${NC} у каждого пользователя их две                  ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    XHTTP  — основная, не больше 3 соединений            ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    Vision — запасная, быстрее на больших загрузках      ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}  ${GREEN}ССЫЛКИ:${NC} у каждого пользователя их две                 ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    XHTTP  — основная, не больше 3 соединений           ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    Vision — запасная, быстрее на больших загрузках     ${CYAN}║${NC}"
   echo -e "${CYAN}║${NC}                                                        ${CYAN}║${NC}"
   echo -e "${CYAN}║${NC}  ${GREEN}ФАЙЛЫ:${NC}                                                ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    /usr/local/etc/xray/config.json  — конфиг Xray       ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    /usr/local/etc/xray/.keys        — ключи Reality     ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    /usr/local/etc/xray/backups/     — бэкапы            ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    /var/log/xray/                   — логи              ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    /usr/local/etc/xray/config.json  — конфиг Xray      ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    /usr/local/etc/xray/.keys        — ключи Reality    ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    /usr/local/etc/xray/backups/     — бэкапы           ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    /var/log/xray/                   — логи             ${CYAN}║${NC}"
   echo -e "${CYAN}║${NC}                                                        ${CYAN}║${NC}"
   echo -e "${CYAN}║${NC}  ${GREEN}СЕРВИС:${NC}                                               ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    systemctl restart xray  — перезапустить              ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    systemctl stop xray     — остановить                 ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    journalctl -u xray -f   — логи в реальном времени    ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    systemctl restart xray  — перезапустить             ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    systemctl stop xray     — остановить                ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    journalctl -u xray -f   — логи в реальном времени   ${CYAN}║${NC}"
   echo -e "${CYAN}║${NC}                                                        ${CYAN}║${NC}"
   echo -e "${CYAN}║${NC}  ${GREEN}КЛИЕНТЫ (нужно ядро Xray 26.3.27+):${NC}                   ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    Android:  v2rayNG, Happ                              ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    iOS:      Happ                                       ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    Windows:  v2rayN                                     ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}    Не подходят: NekoBox, Hiddify, Throne, Karing        ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    Android:  v2rayNG, Happ                             ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    iOS:      Happ                                      ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    Windows:  v2rayN                                    ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    Не подходят: NekoBox, Hiddify, Throne, Karing       ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}                                                        ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}  ${GREEN}ЕСЛИ ПОДКЛЮЧЕНИЕ ВИСИТ:${NC}                               ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    xraystatus — внизу будет самопроверка сервера       ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    Сервер работает, а с телефона нет — в части сетей   ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    теряется длинное TLS-приветствие chrome. Поможет    ${CYAN}║${NC}"
+  echo -e "${CYAN}║${NC}    переустановка в режиме совместимости (edge)         ${CYAN}║${NC}"
   echo -e "${CYAN}║${NC}                                                        ${CYAN}║${NC}"
   echo -e "${CYAN}╚════════════════════════════════════════════════════════╝${NC}"
   echo ""
@@ -1058,7 +1233,23 @@ else
   err "Xray не запустился!\nЛоги: journalctl -u xray -n 50\nКонфиг: jq . $XRAY_CFG"
 fi
 
-# ── 18. Итог ──────────────────────────────────────────────────────────────────
+# ── 18. Самопроверка ──────────────────────────────────────────────────────────
+# Клиент на самом сервере подключается к себе по обеим ссылкам. Так видно,
+# что сервер исправен, ещё до того, как вы импортируете ссылки в приложение.
+hdr "САМОПРОВЕРКА"
+
+SELFTEST_OK=1
+if selftest; then
+  ok "Самопроверка пройдена: $SELFTEST_RESULT"
+else
+  SELFTEST_OK=0
+  warn "Самопроверка НЕ пройдена: $SELFTEST_RESULT"
+  warn "Сервер не принимает подключения даже изнутри. Чаще всего виноват сайт"
+  warn "маскировки — смените его командой xtarget (она проверит новый сайт сама)."
+  warn "Журналы клиента самопроверки: /tmp/xselftest_vision.log, /tmp/xselftest_xhttp.log"
+fi
+
+# ── 19. Итог ──────────────────────────────────────────────────────────────────
 hdr "УСТАНОВКА ЗАВЕРШЕНА"
 
 echo ""
@@ -1068,6 +1259,11 @@ echo -e "  ${GREEN}Протокол:${NC}    VLESS + REALITY"
 echo -e "  ${GREEN}Транспорты:${NC}  XHTTP (основной) + TCP/Vision (запасной)"
 echo -e "  ${GREEN}Маскировка:${NC}  $TARGET"
 echo -e "  ${GREEN}Xray:${NC}        $(xray version 2>/dev/null | awk 'NR==1 {print $2}')"
+if [[ "$FP" == "edge" ]]; then
+  echo -e "  ${GREEN}Отпечаток:${NC}   edge (режим совместимости)"
+else
+  echo -e "  ${GREEN}Отпечаток:${NC}   chrome"
+fi
 echo ""
 
 mainuser
@@ -1076,10 +1272,16 @@ echo -e "${YELLOW}Следующие шаги:${NC}"
 echo "  1. Импортируйте ОСНОВНУЮ ссылку (XHTTP) в v2rayN / v2rayNG / Happ"
 echo "  2. Vision — запасная: если XHTTP не подключается или нужна макс. скорость"
 echo "  3. Меню управления: x   (обновление: xupdate, сайт маскировки: xtarget)"
-if [[ "$XRAY_CHANNEL" == "pin" ]]; then
-  echo ""
-  echo -e "  ${YELLOW}NekoBox, Hiddify, Throne, Karing к этому серверу не подключатся.${NC}"
+echo ""
+echo -e "  ${YELLOW}NekoBox, Hiddify, Throne, Karing к этому серверу не подключатся.${NC}"
+if [[ "$FP" == "chrome" ]]; then
+  echo -e "  ${YELLOW}Если с телефона подключение висит, а xraystatus показывает, что сервер${NC}"
+  echo -e "  ${YELLOW}исправен, — переустановите в режиме совместимости (вариант 2).${NC}"
 fi
 echo ""
-echo -e "${GREEN}✓ Готово!${NC}"
+if [[ "$SELFTEST_OK" == "1" ]]; then
+  echo -e "${GREEN}✓ Готово!${NC}"
+else
+  echo -e "${YELLOW}Установка завершена, но самопроверка не прошла — см. выше.${NC}"
+fi
 echo ""
