@@ -33,12 +33,18 @@ XRAY_CFG="/usr/local/etc/xray/config.json"
 KEYS_FILE="/usr/local/etc/xray/.keys"
 LINK_LIB="/usr/local/lib/xray_link.sh"
 BACKUP_DIR="/usr/local/etc/xray/backups"
-INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+
+# Установщик Xray закреплён на проверенном коммите, а не на ветке main:
+# в октябре 2026 его поведение (права на логи, geo-файлы) менялось без
+# предупреждения. Новый коммит — только после проверки на чистом сервере.
+INSTALLER_COMMIT="e42df6a772e60dd7b058f852262c4dbeb0bc231d"   # 27.10.2026
+INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/$INSTALLER_COMMIT/install-release.sh"
 
 # Основная версия Xray (21.10.2026). Срочное исправление безопасности:
 # из встроенного списка корневых сертификатов убраны скомпрометированные.
-# Сервер новее 26.9.8 пускает только клиентов с постквантовым TLS-приветствием
+# Сервер с 26.9.9 пускает только клиентов с постквантовым TLS-приветствием
 # (отпечатки chrome, firefox, safari) — оно ~1,8 КБ и уходит двумя пакетами.
+# Изменение пришло в 26.9.8, но этот тег разработчики потом удалили.
 XRAY_PIN="v26.10.21"
 
 # Режим совместимости: последняя версия, которая пускает и отпечаток edge.
@@ -128,7 +134,7 @@ ok "Порт: $VLESS_PORT"
 hdr "УСТАНОВКА ЗАВИСИМОСТЕЙ"
 
 apt-get update -qq
-apt-get install -y -qq curl jq qrencode nginx ufw fail2ban openssl
+apt-get install -y -qq curl jq qrencode ufw fail2ban openssl
 ok "Зависимости установлены"
 
 # ── 5. UFW ────────────────────────────────────────────────────────────────────
@@ -137,7 +143,7 @@ hdr "НАСТРОЙКА FIREWALL (UFW)"
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow 22/tcp    comment "SSH"
-ufw allow 80/tcp    comment "HTTP"
+ufw allow 80/tcp    comment "HTTP to Reality target"
 ufw allow "$VLESS_PORT/tcp" comment "VLESS/Reality"
 ufw --force enable
 
@@ -188,61 +194,21 @@ else
   fi
 fi
 
-# ── 8. Nginx (порт 80 — сервер выглядит как обычный сайт) ────────────────────
-hdr "NGINX (легенда прикрытия)"
+# ── 8. Порт 80 ────────────────────────────────────────────────────────────────
+# Своей страницы на 80 не держим: заглушка, одинаковая у всех установок
+# скрипта, — готовая сигнатура для поиска таких серверов, да и на сайт
+# маскировки она не похожа. Как советуют авторы REALITY, Xray пересылает
+# порт 80 на сам сайт маскировки (вход http-in в конфиге) — снаружи сервер
+# и на 80, и на 443 ведёт себя как этот сайт.
+hdr "ПОРТ 80"
 
-# Проверяем, не занят ли порт 80 чем-то кроме nginx
-if ss -tlnp | grep ':80 ' | grep -qv nginx; then
-  info "Порт 80 занят другим процессом. Nginx может не запуститься."
-  read -p "Перезаписать конфиг nginx и перезапустить? (y/n, Enter = y): " NGINX_CONFIRM < /dev/tty
-  NGINX_CONFIRM=${NGINX_CONFIRM:-y}
-  [[ "$NGINX_CONFIRM" != "y" && "$NGINX_CONFIRM" != "Y" ]] && {
-    info "Пропускаем настройку Nginx"
-    SKIP_NGINX=1
-  }
-fi
-
-if [[ "${SKIP_NGINX:-0}" != "1" ]]; then
-  mkdir -p /var/www/html
-
-  cat > /var/www/html/index.html << 'EOF'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Welcome</title>
-  <style>
-    body { font-family: -apple-system, sans-serif; max-width: 600px;
-           margin: 120px auto; text-align: center; color: #333; }
-    h1   { color: #0078d4; font-weight: 300; }
-    p    { color: #666; }
-  </style>
-</head>
-<body>
-  <h1>Welcome</h1>
-  <p>The server is up and running.</p>
-</body>
-</html>
-EOF
-
-  cat > /etc/nginx/sites-available/default << 'NGINXCFG'
-server {
-    listen 80 default_server;
-    server_name _;
-    root /var/www/html;
-    index index.html;
-
-    location / {
-        try_files $uri $uri/ =404;
-    }
-}
-NGINXCFG
-
-  nginx -t -q
-  systemctl enable nginx --quiet
-  systemctl restart nginx
-  ok "Nginx запущен на порту 80"
+HTTP_FWD=1
+if ss -tlnp | grep ':80 ' | grep -qv '"xray"'; then
+  HTTP_FWD=0
+  warn "Порт 80 занят другим процессом — пересылку на сайт маскировки не включаю"
+  warn "Если это nginx от прошлой версии скрипта: systemctl disable --now nginx и запустите установку заново"
+else
+  ok "Порт 80 свободен — Xray будет пересылать его на сайт маскировки"
 fi
 
 # ── 9. Установка Xray-core ────────────────────────────────────────────────────
@@ -255,6 +221,11 @@ bash -c "$(curl -4 -fL "$INSTALLER_URL")" @ install --version "$XRAY_VERSION" -f
 
 command -v xray &>/dev/null || err "Xray не установился, проверьте подключение к интернету"
 XRAY_VER=$(xray version 2>&1 | head -1 || true)
+# Код возврата установщика не показатель (|| true выше: он сообщает об ошибке,
+# когда служба не запустилась, а до нашего конфига так бывает), поэтому
+# сверяем, что встала именно выбранная версия
+[ "$(echo "$XRAY_VER" | awk '{print $2}')" = "${XRAY_VERSION#v}" ] || \
+  err "Установилась не та версия Xray: ${XRAY_VER:-нет} (нужна ${XRAY_VERSION#v})"
 ok "$XRAY_VER"
 
 # ── 10. Библиотека для утилит ─────────────────────────────────────────────────
@@ -274,6 +245,10 @@ YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
 XRAY_CFG="/usr/local/etc/xray/config.json"
 XRAY_KEYS="/usr/local/etc/xray/.keys"
+
+# Файлы самопроверки — в каталоге только для root: в конфигах клиента лежит
+# UUID основного пользователя. Журналы клиента остаются там до следующей проверки.
+SELFTEST_DIR="/run/xray-selftest"
 
 # Настройки XHTTP, которые сервер «спускает» клиенту через параметр extra.
 # maxConnections 3 — под правило ТСПУ «больше 3 TLS-соединений к одному SNI».
@@ -337,10 +312,10 @@ check_target() {
   local d="$1" ip4 out grp sans code loc lhost ver
   TARGET_WHY=""; TARGET_PQ=0
 
-  # До 26.9.8 сертификат microsoft не влезает в буфер REALITY (Xray #6356)
+  # До 26.9.9 сертификат microsoft не влезает в буфер REALITY (Xray #6356)
   if [[ "$d" == *microsoft.com ]]; then
     ver=$(xray version 2>/dev/null | awk 'NR==1 {print $2}')
-    if [ "$(printf '%s\n' "${ver:-0}" 26.9.8 | sort -V | head -1)" != "26.9.8" ]; then
+    if [ "$(printf '%s\n' "${ver:-0}" 26.9.9 | sort -V | head -1)" != "26.9.9" ]; then
       TARGET_WHY="на Xray ${ver:-?} ломает REALITY (баг #6356)"
       return 1
     fi
@@ -466,6 +441,7 @@ selftest() {
   sid=$(awk '/^shortsid:/ {print $2}' "$XRAY_KEYS")
   fp=$(get_fp)
   SELFTEST_RESULT=""
+  install -d -m 700 "$SELFTEST_DIR"
 
   for kind in vision xhttp; do
     if [ "$kind" = vision ]; then
@@ -483,8 +459,8 @@ selftest() {
         settings: {address: "127.0.0.1", port: $port, id: $id, flow: $flow, encryption: "none"},
         streamSettings: ($ss + {security: "reality",
           realitySettings: {serverName: $sni, fingerprint: $fp, password: $pbk, shortId: $sid}})}]
-    }' > "/tmp/xselftest_$kind.json"
-    xray run -c "/tmp/xselftest_$kind.json" > "/tmp/xselftest_$kind.log" 2>&1 &
+    }' > "$SELFTEST_DIR/$kind.json"
+    xray run -c "$SELFTEST_DIR/$kind.json" > "$SELFTEST_DIR/$kind.log" 2>&1 &
     if [ "$kind" = vision ]; then p1=$!; else p2=$!; fi
   done
   sleep 2
@@ -503,7 +479,7 @@ selftest() {
 
   kill "$p1" "$p2" 2>/dev/null || true
   wait "$p1" "$p2" 2>/dev/null || true
-  rm -f /tmp/xselftest_vision.json /tmp/xselftest_xhttp.json
+  rm -f "$SELFTEST_DIR/vision.json" "$SELFTEST_DIR/xhttp.json"
   SELFTEST_RESULT="${SELFTEST_RESULT%; }"
   return $rc
 }
@@ -628,11 +604,19 @@ mkdir -p /var/log/xray
 #   xhttp-in  — XHTTP на внутреннем сокете @xray-xhttp.
 # XHTTP-клиент тоже проходит REALITY на внешнем порту, но внутри шлёт HTTP/2,
 # а не VLESS — такой трафик vless-in отдаёт через fallback в xhttp-in.
+# Отдельно http-in — порт 80, пересылка на сайт маскировки (см. раздел 8).
+#
+# access: none — журнал подключений не ведём: в нём IP пользователей и куда
+# они ходят. Для диагностики хватает error-лога.
+# limitFallback* — ограничение скорости только для чужих (не наших) соединений,
+# которые REALITY пробрасывает на сайт маскировки: первые 1 МБ без ограничений,
+# дальше 256 КБ/с. Так сервер не станет бесплатным каналом к этому сайту.
+# Пользователей это не касается.
 cat > "$XRAY_CFG" << XRAYCFG
 {
   "log": {
     "loglevel": "warning",
-    "access": "/var/log/xray/access.log",
+    "access": "none",
     "error":  "/var/log/xray/error.log"
   },
   "dns": {
@@ -690,7 +674,9 @@ cat > "$XRAY_CFG" << XRAYCFG
           "xver": 0,
           "serverNames": ["$TARGET"],
           "privateKey": "$PRIVATEKEY",
-          "shortIds": ["$SHORTSID"]
+          "shortIds": ["$SHORTSID"],
+          "limitFallbackUpload":   { "afterBytes": 1048576, "bytesPerSec": 262144, "burstBytesPerSec": 524288 },
+          "limitFallbackDownload": { "afterBytes": 1048576, "bytesPerSec": 262144, "burstBytesPerSec": 524288 }
         }
       },
       "sniffing": {
@@ -726,6 +712,17 @@ cat > "$XRAY_CFG" << XRAYCFG
         "destOverride": ["http", "tls", "quic"],
         "routeOnly": true
       }
+    },
+    {
+      "tag": "http-in",
+      "listen": "0.0.0.0",
+      "port": 80,
+      "protocol": "tunnel",
+      "settings": {
+        "rewriteAddress": "$TARGET",
+        "rewritePort": 80,
+        "allowedNetwork": "tcp"
+      }
     }
   ],
   "outbounds": [
@@ -744,6 +741,12 @@ cat > "$XRAY_CFG" << XRAYCFG
   }
 }
 XRAYCFG
+
+# Порт 80 занят чем-то другим — без пересылки, иначе Xray не запустится
+if [ "$HTTP_FWD" != "1" ]; then
+  tmpfile=$(mktemp --suffix=.json)
+  jq 'del(.inbounds[] | select(.tag=="http-in"))' "$XRAY_CFG" > "$tmpfile" && mv "$tmpfile" "$XRAY_CFG"
+fi
 
 jq empty "$XRAY_CFG" || err "Ошибка в JSON конфигурации!"
 test_cfg "$XRAY_CFG" || \
@@ -855,10 +858,16 @@ read -p "Удалить '$selected'? (y/n): " confirm
 [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Отменено"; exit 0; }
 
 # Удаляем из обоих входов (Vision и XHTTP)
-tmpfile=$(mktemp)
-jq --arg e "$selected" \
-  '(.inbounds[].settings.clients) |= map(select(.email != $e))' \
-  "$XRAY_CFG" > "$tmpfile" && mv "$tmpfile" "$XRAY_CFG" && secure_cfg "$XRAY_CFG"
+tmpfile=$(mktemp --suffix=.json)
+if jq --arg e "$selected" \
+     '(.inbounds[] | select(.tag=="vless-in" or .tag=="xhttp-in") | .settings.clients) |= map(select(.email != $e))' \
+     "$XRAY_CFG" > "$tmpfile" && test_cfg "$tmpfile"; then
+  mv "$tmpfile" "$XRAY_CFG" && secure_cfg "$XRAY_CFG"
+else
+  rm -f "$tmpfile"
+  echo -e "${RED}Не удалось обновить конфиг, ничего не изменено${NC}"
+  exit 1
+fi
 
 systemctl restart xray
 echo -e "${GREEN}Клиент '$selected' удалён${NC}"
@@ -969,7 +978,7 @@ chmod +x /usr/local/bin/xraystatus
 cat > /usr/local/bin/xupdate << 'SCRIPT'
 #!/bin/bash
 source /usr/local/lib/xray_link.sh
-URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+URL="__INSTALLER_URL__"   # подставляет install_xray.sh: тот же закреплённый коммит
 
 # ver_ge A B — версия A не ниже B
 ver_ge() { [ "$(printf '%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
@@ -1004,11 +1013,11 @@ case "$c" in
   *) echo "Отменено"; exit 0 ;;
 esac
 
-# Отпечаток edge принимают только версии до 26.9.8 (Xray #7259)
+# Отпечаток edge принимают только версии до 26.9.9 (Xray #7259)
 switch_fp=""
 if [ "$fp" = edge ] && [ "$c" != 4 ]; then
   echo ""
-  echo -e "${YELLOW}Ссылки сейчас с отпечатком edge, а версии Xray с 26.9.8 его не принимают.${NC}"
+  echo -e "${YELLOW}Ссылки сейчас с отпечатком edge, а версии Xray с 26.9.9 его не принимают.${NC}"
   echo -e "Если новая версия окажется новее, ссылки нужно перевести на chrome"
   echo -e "и заново раздать всем (sharelink). Без этого обновление откатится."
   read -p "Перевести ссылки на chrome, если понадобится? (y/N): " sw
@@ -1032,7 +1041,12 @@ rollback() {
 
 new=$(xray version 2>/dev/null | awk 'NR==1 {print $2}')
 
-if [ "$fp" = edge ] && [ -n "$new" ] && ver_ge "$new" 26.9.8; then
+if [ "$c" = 3 ] && [ "$new" != "${v#v}" ]; then
+  [ -n "$cur" ] && rollback "Установилась версия ${new:-?} вместо ${v#v}"
+  exit 1
+fi
+
+if [ "$fp" = edge ] && [ -n "$new" ] && ver_ge "$new" 26.9.9; then
   if [ "$switch_fp" = chrome ]; then
     if grep -q '^fp:' "$XRAY_KEYS"; then
       sed -i 's/^fp: .*/fp: chrome/' "$XRAY_KEYS"
@@ -1071,6 +1085,7 @@ echo -e "${GREEN}Готово: ${cur:-?} → ${new:-?}${NC}"
 echo ""
 SCRIPT
 chmod +x /usr/local/bin/xupdate
+sed -i "s#__INSTALLER_URL__#$INSTALLER_URL#" /usr/local/bin/xupdate
 
 # ── xtarget ───────────────────────────────────────────────────────────────────
 cat > /usr/local/bin/xtarget << 'SCRIPT'
@@ -1104,10 +1119,12 @@ echo -e "${GREEN}подходит${NC}"
 
 xraybackup >/dev/null
 
+# Порт 80 (вход http-in, если он есть) тоже пересылаем на новый сайт
 tmpfile=$(mktemp --suffix=.json)
-jq --arg d "$new" \
-  '(.inbounds[] | select(.tag=="vless-in") | .streamSettings.realitySettings) |= (.target = ($d + ":443") | .serverNames = [$d])' \
-  "$XRAY_CFG" > "$tmpfile"
+jq --arg d "$new" '
+     (.inbounds[] | select(.tag=="vless-in") | .streamSettings.realitySettings) |= (.target = ($d + ":443") | .serverNames = [$d])
+   | (.inbounds[] | select(.tag=="http-in") | .settings.rewriteAddress) = $d
+   ' "$XRAY_CFG" > "$tmpfile"
 if ! test_cfg "$tmpfile"; then
   rm -f "$tmpfile"
   echo -e "${RED}Конфиг не прошёл проверку, ничего не изменено${NC}"; exit 1
@@ -1268,7 +1285,7 @@ else
   warn "Самопроверка НЕ пройдена: $SELFTEST_RESULT"
   warn "Сервер не принимает подключения даже изнутри. Чаще всего виноват сайт"
   warn "маскировки — смените его командой xtarget (она проверит новый сайт сама)."
-  warn "Журналы клиента самопроверки: /tmp/xselftest_vision.log, /tmp/xselftest_xhttp.log"
+  warn "Журналы клиента самопроверки: $SELFTEST_DIR/vision.log, $SELFTEST_DIR/xhttp.log"
 fi
 
 # ── 19. Итог ──────────────────────────────────────────────────────────────────
@@ -1280,6 +1297,9 @@ echo -e "  ${GREEN}Порт:${NC}        $VLESS_PORT"
 echo -e "  ${GREEN}Протокол:${NC}    VLESS + REALITY"
 echo -e "  ${GREEN}Транспорты:${NC}  XHTTP (основной) + TCP/Vision (запасной)"
 echo -e "  ${GREEN}Маскировка:${NC}  $TARGET"
+if [[ "$HTTP_FWD" == "1" ]]; then
+  echo -e "  ${GREEN}Порт 80:${NC}     пересылка на $TARGET"
+fi
 echo -e "  ${GREEN}Xray:${NC}        $(xray version 2>/dev/null | awk 'NR==1 {print $2}')"
 if [[ "$FP" == "edge" ]]; then
   echo -e "  ${GREEN}Отпечаток:${NC}   edge (режим совместимости)"
